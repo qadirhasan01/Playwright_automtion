@@ -1,0 +1,12 @@
+{
+  "nonExistingUserId": 23,
+  "nonExistingResourceId": 23,
+  "invalidEndpoint": "/this-endpoint-does-not-exist",
+  "registerMissingPassword": {
+    "email": "sydney@fife"
+  },
+  "loginMissingPassword": {
+    "email": "peter@klaven"
+  },
+  "emptyPayload": {}
+}

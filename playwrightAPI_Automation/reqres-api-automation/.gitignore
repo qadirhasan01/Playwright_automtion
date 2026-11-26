@@ -1,0 +1,23 @@
+# Dependencies
+node_modules/
+
+# Env & secrets
+.env
+
+# Build output
+dist/
+
+# Playwright
+/reports/
+/test-results/
+/playwright/.cache/
+
+# Allure
+/allure-results/
+/allure-report/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
