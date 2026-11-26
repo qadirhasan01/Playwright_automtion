@@ -18,12 +18,18 @@ export default defineConfig({
   testDir: './tests',
   // Fail CI if a stray test.only is left behind.
   forbidOnly: !!process.env.CI,
-  // Retry flaky network calls on CI only.
+  // The ApiClient already backs off and retries on 429, so no test-level
+  // retries are needed locally (they would just double-spend the rate limit).
   retries: process.env.CI ? 2 : 0,
-  workers: process.env.CI ? 1 : undefined,
+  // Run serially by default: the public ReqRes "shared demo" key is rate
+  // limited and bursts of parallel requests return 429. With your OWN free
+  // key (https://app.reqres.in — 250 req/day) you can safely raise this,
+  // e.g. `npx playwright test --workers=4`.
+  workers: 1,
   fullyParallel: true,
-  // Global expect timeout.
-  timeout: env.timeout,
+  // Per-test timeout. Generous because the client may back off up to ~60s
+  // when it hits the shared key's 20-requests-per-minute rate limit.
+  timeout: 90_000,
 
   reporter: [
     ['list'],
@@ -32,7 +38,9 @@ export default defineConfig({
   ],
 
   use: {
-    baseURL: env.baseURL,
+    // NOTE: the base URL is applied by ApiClient (safe join that preserves the
+    // "/api" path segment), not here — a leading-slash path under Playwright's
+    // own `baseURL` would drop "/api". See src/clients/apiClient.ts.
     // Default headers applied to EVERY request via the `request` fixture.
     extraHTTPHeaders: {
       Accept: 'application/json',

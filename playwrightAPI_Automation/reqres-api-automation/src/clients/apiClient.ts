@@ -1,4 +1,5 @@
 import { APIRequestContext, APIResponse, test } from '@playwright/test';
+import { env } from '../config/environment';
 
 /**
  * apiClient.ts
@@ -42,6 +43,22 @@ type HttpMethod = 'get' | 'post' | 'put' | 'patch' | 'delete';
 export class ApiClient {
   constructor(private readonly request: APIRequestContext) {}
 
+  /**
+   * Safely join the base URL with an endpoint.
+   *
+   * We build the absolute URL ourselves instead of relying on Playwright's
+   * `use.baseURL`, because a leading-slash path (e.g. "/users/2") resolves
+   * against the ORIGIN under `new URL()` semantics and would DROP the
+   * "/api" path segment (hitting reqres.in/users/2 -> 404). This keeps the
+   * "/api" prefix no matter how the endpoint is written.
+   */
+  private buildUrl(endpoint: string): string {
+    if (/^https?:\/\//i.test(endpoint)) return endpoint; // already absolute
+    const base = env.baseURL.replace(/\/+$/, '');
+    const path = endpoint.replace(/^\/+/, '');
+    return `${base}/${path}`;
+  }
+
   get(endpoint: string, options: RequestOptions = {}): Promise<APIResponse> {
     return this.send('get', endpoint, options);
   }
@@ -72,39 +89,69 @@ export class ApiClient {
     return { response, durationMs: Date.now() - start };
   }
 
-  /** Core dispatcher used by every verb. Centralizes timing + logging + errors. */
+  /** Core dispatcher used by every verb. Centralizes timing + logging + errors + 429 backoff. */
   private async send(
     method: HttpMethod,
     endpoint: string,
     options: RequestOptions,
   ): Promise<APIResponse> {
-    const start = Date.now();
-    let response: APIResponse;
+    const url = this.buildUrl(endpoint);
+    const maxAttempts = 4;
 
-    try {
-      response = await this.request[method](endpoint, {
-        headers: options.headers,
-        params: options.params,
-        data: options.data,
-      });
-    } catch (error) {
-      // Network / connection errors (DNS, timeout, refused) land here.
-      await this.attach(
-        `❌ ${method.toUpperCase()} ${endpoint} (request failed)`,
-        {
+    for (let attempt = 1; ; attempt++) {
+      const start = Date.now();
+      let response: APIResponse;
+
+      try {
+        response = await this.request[method](url, {
+          headers: options.headers,
+          params: options.params,
+          data: options.data,
+        });
+      } catch (error) {
+        // Network / connection errors (DNS, timeout, refused) land here.
+        await this.attach(`❌ ${method.toUpperCase()} ${endpoint} (request failed)`, {
           endpoint,
           method: method.toUpperCase(),
           params: options.params,
           requestBody: options.data,
           error: error instanceof Error ? error.message : String(error),
-        },
-      );
-      throw error;
-    }
+        });
+        throw error;
+      }
 
-    const durationMs = Date.now() - start;
-    await this.logExchange(method, endpoint, options, response, durationMs);
-    return response;
+      const durationMs = Date.now() - start;
+
+      // ReqRes' shared demo key allows 20 requests / 60s. On a 429 we honor
+      // the Ratelimit-Reset header, pause, and retry — so the suite paces
+      // itself instead of failing on throttling.
+      if (response.status() === 429 && attempt < maxAttempts) {
+        const waitMs = this.rateLimitWaitMs(response);
+        await this.attach(
+          `⏳ 429 Too Many Requests on ${method.toUpperCase()} ${endpoint} — backing off ${waitMs}ms (attempt ${attempt}/${maxAttempts})`,
+          { rateLimitHeaders: this.maskHeaders(response.headers()) },
+        );
+        await this.sleep(waitMs);
+        continue;
+      }
+
+      await this.logExchange(method, endpoint, options, response, durationMs);
+      return response;
+    }
+  }
+
+  /** Decide how long to wait after a 429, from Ratelimit-Reset / Retry-After (seconds). */
+  private rateLimitWaitMs(response: APIResponse): number {
+    const headers = response.headers();
+    const resetSec = Number(headers['ratelimit-reset'] ?? headers['retry-after']);
+    const base = Number.isFinite(resetSec) && resetSec > 0 ? resetSec : 2;
+    // Add a 1s buffer and cap at just over one window (60s).
+    return Math.min((base + 1) * 1000, 65_000);
+  }
+
+  /** Promise-based sleep. */
+  private sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
   /** Build a readable, masked log entry and attach it to the HTML report. */
